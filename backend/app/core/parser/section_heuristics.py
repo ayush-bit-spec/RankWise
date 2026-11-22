@@ -4,7 +4,11 @@ import re
 
 EMAIL_REGEX = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
 PHONE_REGEX = re.compile(
-    r"(?:(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}|\b\d{10}\b)"
+    r"(?:"
+    r"(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"  # US / generic 3-3-4
+    r"|(?:\+?91[-.\s]?)?[6-9]\d{4}[-.\s]?\d{5}"  # India 5-5 (e.g. +91 98765 43210)
+    r"|\b\d{10}\b"
+    r")"
 )
 
 # Common section headers

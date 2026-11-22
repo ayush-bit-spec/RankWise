@@ -1,4 +1,4 @@
-# RankWise: AI-Powered Candidate Ranking & Resume Screening System
+﻿# RankWise: AI-Powered Candidate Ranking & Resume Screening System
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688.svg)](https://fastapi.tiangolo.com/)
@@ -87,16 +87,19 @@ Generative LLMs are prone to score drift, hallucination, non-deterministic varia
 
 ## 4. Evaluation Benchmark Results
 
-Ablation evaluation was conducted across 45 labeled candidate resumes across 3 roles (*Distributed Systems*, *Data Engineering*, *NLP/ML*) including adversarial keyword-stuffer resumes:
+The ablation harness (`GET /api/evaluation/results`) compares three systems on a **synthetic, labeled dataset of 21 resumes across 3 roles** (15 for *Senior Backend & Distributed Systems*, 3 each for *Data Pipeline* and *ML/NLP*), including keyword-stuffer resumes. The "Full System" column runs the **real ranking pipeline** (chunking -> two-stage retrieval -> evidence verdict -> deterministic scoring); ground-truth labels are used only to compute the metrics, never to rank.
 
-| Architecture | NDCG@5 | NDCG@10 | Precision@5 | MRR | Keyword Stuffer Rank |
+Main role (15 resumes, offline/mock mode with the built-in fallback encoder):
+
+| Architecture | NDCG@5 | NDCG@10 | Precision@5 | MRR | Keyword-stuffer rank (of 15) |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Baseline ATS (TF-IDF)** | 0.812 | 0.795 | 0.600 | 1.000 | **Rank #1 or #2 (Fails)** |
-| **Embeddings Only (Bi-Encoder)** | 0.894 | 0.862 | 0.800 | 1.000 | Rank #4 |
-| **RankWise Full System** | **0.958** | **0.941** | **1.000** | **1.000** | **Rank #10 (Filtered to 0%)** |
+| **Baseline ATS (TF-IDF)** | 0.917 | 0.960 | 0.800 | 1.000 | #5 |
+| **Embeddings Only** | 0.835 | 0.886 | 0.800 | 1.000 | n/a |
+| **RankWise Full System** | **1.000** | **1.000** | **1.000** | **1.000** | #10 |
+
+**Limitations (be upfront about these):** the dataset is small and synthetic, so these numbers show the pipeline behaves sensibly, not that it generalizes. On the two 3-resume roles the Full System only ties or modestly beats the baseline, and the keyword-trap resume is *not* pushed down there. Results use the offline fallback encoder and the mock LLM; they will differ with sentence-transformers and a live LLM.
 
 ---
-
 ## 5. Quickstart & Setup Guide
 
 ### Prerequisites
@@ -111,20 +114,24 @@ Ablation evaluation was conducted across 45 labeled candidate resumes across 3 r
    cd RankWise/backend
    ```
 
-2. **Activate the virtual environment**:
+2. **Create and activate a virtual environment**:
    - Windows (PowerShell):
      ```powershell
+     python -m venv venv
      .\venv\Scripts\Activate.ps1
      ```
    - macOS / Linux:
      ```bash
+     python -m venv venv
      source venv/bin/activate
      ```
 
 3. **Install dependencies**:
    ```bash
-   pip install -r requirements.txt
+   cp ../.env.example .env        # Windows: copy ..\.env.example .env
+   pip install -r requirements-core.txt
    ```
+   `requirements-core.txt` is the minimal set (installs in ~1-2 minutes) and runs fully offline with the mock LLM. Use `pip install -r requirements.txt` for the complete stack (real sentence-transformers embeddings, live Gemini/OpenAI/Claude providers); it is a much larger download (PyTorch).
 
 4. **Populate demo data (Seed script)**:
    ```bash
@@ -182,3 +189,4 @@ pytest -v tests
 2. **Blind Mode & Counterfactual Audits**: Proactively mitigates unconscious bias by redacting names, contact info, pronouns, and graduation years, and verifying score invariance.
 3. **EEOC Adverse Impact Compliance**: Continuously reports the four-fifths (80%) ratio across demographic cohorts to prevent disparate impact.
 4. **Scorer Attribute Isolation**: Strict unit tests assert that protected demographic attributes can never be passed as features into the scoring formulas.
+

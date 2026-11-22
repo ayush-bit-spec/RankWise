@@ -5,7 +5,18 @@ from typing import Any
 import numpy as np
 
 from app.core.embeddings import bi_encoder, reranker
+from app.core.embeddings.chunker import chunk_resume
+from app.core.embeddings.retriever import two_stage_retriever
 from app.core.evaluation.baseline_ats import BaselineATS
+from app.core.llm import get_llm_client
+from app.core.scoring.engine import (
+    compute_evidence_location_weight,
+    compute_overall_score,
+    compute_recency_weight,
+    compute_requirement_score,
+)
+from app.core.scoring.evidence_judge import judge_evidence
+from app.schemas.job import Requirement
 
 
 def compute_dcg(relevances: list[int], k: int) -> float:
@@ -73,20 +84,54 @@ class EvaluationHarness:
         emb_pool.sort(key=lambda x: x["score"], reverse=True)
         emb_relevances = [x["cand"]["ground_truth_relevance"] for x in emb_pool]
 
-        # 3. System C: Full System (Bi-Encoder retrieval + Cross-Encoder reranking + Evidence Filtering)
+        # 3. System C: Full System — the REAL pipeline used by RankingService:
+        #    chunking -> two-stage retrieval -> LLM evidence verdict -> deterministic scoring.
+        #    Ground-truth labels (ground_truth_relevance / is_keyword_trap) are NEVER read
+        #    here; they are only used afterwards to compute the metrics.
         full_pool = []
+        llm = get_llm_client()
+        requirements = [
+            Requirement(
+                text=r["text"],
+                type=r.get("type", "must_have"),
+                category=r.get("category", "skill"),
+            )
+            for r in reqs
+        ]
         for c in candidates:
-            # Full system penalties keyword-stuffing with no verified experience
-            base_score = float(bi_sims[candidates.index(c)])
-            is_trap = c.get("is_keyword_trap", False)
-            if is_trap:
-                # Evidence judge strictly gives 'None' to keyword-stuffed hobbies
-                system_score = 0.05
-            else:
-                # Top candidates get cross-encoder precision rerank boost
-                system_score = base_score * (1.15 if c["ground_truth_relevance"] >= 2 else 0.85)
+            chunks = chunk_resume({}, c["raw_text"])
+            matches = two_stage_retriever.match_requirements_to_chunks(
+                chunks=chunks, requirements=requirements, stage1_top_k=5
+            )
+            must_scores: list[float] = []
+            nice_scores: list[float] = []
+            for m in matches:
+                best_chunk = m["best_chunk"]
+                snippets = [t["text"] for t in m.get("top_candidates", []) if t.get("text")]
+                if not snippets and best_chunk:
+                    snippets = [best_chunk.text]
+                verdict = judge_evidence(m["requirement_text"], snippets, llm)
+                score = compute_requirement_score(
+                    verdict=verdict.verdict,
+                    semantic_similarity=m["semantic_similarity"],
+                    location_weight=(
+                        compute_evidence_location_weight(best_chunk.chunk_type) if best_chunk else 0.40
+                    ),
+                    recency_weight=compute_recency_weight(best_chunk.metadata) if best_chunk else 0.75,
+                    duration_weight=1.0,
+                )
+                (must_scores if m["requirement_type"] == "must_have" else nice_scores).append(score)
 
-            full_pool.append({"cand": c, "score": min(1.0, system_score)})
+            # Only requirement evidence is available for raw benchmark text (no parsed
+            # experience/education), so those two components get zero weight.
+            overall = compute_overall_score(
+                must_have_score=sum(must_scores) / len(must_scores) if must_scores else 1.0,
+                nice_to_have_score=sum(nice_scores) / len(nice_scores) if nice_scores else 1.0,
+                experience_fit_score=0.0,
+                education_fit_score=0.0,
+                weights={"must_have": 0.40, "nice_to_have": 0.20, "experience": 0.0, "education": 0.0},
+            )
+            full_pool.append({"cand": c, "score": overall})
 
         full_pool.sort(key=lambda x: x["score"], reverse=True)
         full_relevances = [x["cand"]["ground_truth_relevance"] for x in full_pool]
@@ -102,12 +147,15 @@ class EvaluationHarness:
                 "embeddings_only": compute_ndcg(emb_relevances, k),
                 "full_system": compute_ndcg(full_relevances, k),
             },
-            {
+        ]
+        if k10 != k:
+            metrics.append({
                 "metric": f"NDCG@{k10}",
                 "baseline_ats": compute_ndcg(ats_relevances, k10),
                 "embeddings_only": compute_ndcg(emb_relevances, k10),
                 "full_system": compute_ndcg(full_relevances, k10),
-            },
+            })
+        metrics += [
             {
                 "metric": f"Precision@{k}",
                 "baseline_ats": compute_precision_at_k(ats_relevances, k),
@@ -135,15 +183,27 @@ class EvaluationHarness:
                     "baseline_ats_rank": ats_rank,
                     "full_system_rank": full_rank,
                     "behavior": (
-                        f"Legacy ATS ranked #{ats_rank} due to term frequency; "
-                        f"RankWise Full System penalized to #{full_rank} using evidence-based grounding."
+                        f"Baseline ATS ranked it #{ats_rank}; "
+                        f"RankWise Full System ranked it #{full_rank} of {len(candidates)} "
+                        + (
+                            "(pushed down by evidence-based grounding)."
+                            if (full_rank or 0) > (ats_rank or 0)
+                            else "(no improvement over baseline)."
+                        )
                     ),
                 })
 
+        full_n, ats_n = metrics[0]["full_system"], metrics[0]["baseline_ats"]
+        if full_n > ats_n:
+            verdict_txt = "outperforms"
+        elif full_n < ats_n:
+            verdict_txt = "underperforms"
+        else:
+            verdict_txt = "ties with"
         summary = (
-            f"Evaluation on '{role_data['title']}': Full System achieves superior NDCG@{k} "
-            f"({metrics[0]['full_system']:.3f} vs {metrics[0]['baseline_ats']:.3f} for baseline ATS), "
-            f"successfully filtering {len(keyword_traps)} keyword-trap resumes."
+            f"Evaluation on '{role_data['title']}' ({len(candidates)} resumes): Full System "
+            f"{verdict_txt} baseline ATS on {metrics[0]['metric']} ({full_n:.3f} vs {ats_n:.3f}); "
+            f"{len(keyword_traps)} keyword-trap resume(s) included."
         )
 
         return {

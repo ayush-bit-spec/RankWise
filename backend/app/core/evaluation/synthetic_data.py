@@ -1,4 +1,4 @@
-"""Synthetic benchmark dataset generator — 45 labeled candidate resumes across 3 roles with keyword traps."""
+"""Synthetic benchmark dataset generator — 21 labeled candidate resumes across 3 roles with keyword traps."""
 
 from typing import Any
 
